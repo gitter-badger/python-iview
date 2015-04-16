@@ -1,12 +1,14 @@
 import os
 import urllib.request
 import sys
+import socket
 from . import config
 from . import parser
 import gzip
 from urllib.parse import urljoin, urlsplit
 from urllib.parse import urlencode
 from .utils import http_get
+import json
 
 
 iview_config = None
@@ -25,12 +27,15 @@ def fetch_url(url, types=None):
     from .utils import PersistentConnectionHandler
     with PersistentConnectionHandler(timeout=10) as connection:
         session = urllib.request.build_opener(connection)
-        with http_get(session, url, types, headers=headers) as http:
-            headers = http.info()
-            if headers.get('content-encoding') == 'gzip':
-                return gzip.GzipFile(fileobj=http).read()
-            else:
-                return http.read()
+        try:
+            with http_get(session, url, types, headers=headers) as http:
+                headers = http.info()
+                if headers.get('content-encoding') == 'gzip':
+                    return gzip.GzipFile(fileobj=http).read()
+                else:
+                    return http.read()
+        except socket.timeout as error:
+            raise Error("Timeout accessing {!r}".format(url)) from error
 
 def maybe_fetch(url, type=None):
     """Only fetches a URL if it is not in the cache directory.
@@ -105,41 +110,45 @@ def get_index():
     that are available to us. Returns a list of "dict" objects,
     one for each series.
     """
-    return series_api('seriesIndex')
+    json = _api_get('index')
+    result = list()
+    for section in json['index']:  # A, B, C, . . . sections
+        for [episode, series] in parser.parse_index_section(section):
+            episode['title'] = series
+            result.append(episode)
+    return result
 
-def get_series_items(series_id, get_meta=False):
-    """This function fetches the series detail page for the selected series,
-    which contain the items (i.e. the actual episodes). By
-    default, returns a list of "dict" objects, one for each
-    episode. If "get_meta" is set, returns a tuple with the first
-    element being the list of episodes, and the second element a
-    "dict" object of series infomation.
+def get_series_items(href):
+    """This function fetches the list of episodes in the same a series
+    (season) as the given programme. It returns a tuple with the first
+    element being the list of episodes, and the second element holding the
+    series information. Each episode list item and the series element are
+    "dict" objects.
     """
 
-    series = series_api('series', series_id)
+    json = _api_get(href)  # TODO: persistent connection
+    [episode, series] = parser.parse_episode(json)
+    episodes = [episode]
+    related = _api_get(json['related'])['index']
+    if len(related) < 2:  # Probably just "More Like This"
+        others = ()
+    else:
+        others = related[0]  # First section is probably "N Other Episodes"
+    for [episode, _] in parser.parse_index_section(others):
+        episodes.append(episode)
+    return (episodes, series)
 
-    for meta in series:
-        if meta['id'] == series_id:
-            break
-    else:
-        # Bad series number returns empty json string, ignore it.
-        print('no results for series id {}, skipping'.format(series_id), file=sys.stderr)
-        return []
-    
-    items = meta['items']
-    if get_meta:
-        return (items, meta)
-    else:
-        return items
+def get_episode(href):
+    json = _api_get(href)
+    return json["playlist"][-1]
 
 def get_keyword(keyword):
     return series_api('keyword', keyword)
 
-def series_api(key, value=""):
-    query = urlencode(((key, value),))
-    url = urljoin(iview_config['api_url'], '?' + query)
-    index_data = maybe_fetch(url, ("application/json",))
-    return parser.parse_series_api(index_data)
+def _api_get(url):
+    url = urljoin(urljoin(config.base_2014, config.api_2014), url)
+    soup = maybe_fetch(url, ("application/json",))
+    return json.loads(soup.decode("UTF-8"))
 
 def get_highlights():
     # Reported as Content-Type: text/html
@@ -174,6 +183,9 @@ def configure_socks_proxy():
         sys.exit(3)
 
     socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5, config.socks_proxy_host, config.socks_proxy_port)
+
+class Error(EnvironmentError):
+    pass
 
 if config.socks_proxy_host is not None:
     configure_socks_proxy()

@@ -24,9 +24,8 @@ from .utils import streamcopy, fastforward
 from shutil import copyfileobj
 import urllib.request
 from .utils import PersistentConnectionHandler, http_get
-from .utils import urlencode_param
-from sys import stderr
-from urllib.parse import urljoin
+from sys import stderr, stdout
+from urllib.parse import urljoin, urlencode, quote_plus, urlsplit
 import io
 from .utils import xml_text_elements
 from . import flvlib
@@ -35,9 +34,10 @@ from .utils import WritingReader
 from errno import ESPIPE, EBADF, EINVAL
 import os
 from itertools import chain
+from .config import akamaihd_key
 
-def fetch(*pos, dest_file, frontend=None, abort=None, player=None, key=None,
-**kw):
+def fetch(*pos, dest_file=stdout.buffer, frontend=None, abort=None,
+        player=None, **kw):
     url = manifest_url(*pos, **kw)
     
     with PersistentConnectionHandler() as connection:
@@ -45,7 +45,7 @@ def fetch(*pos, dest_file, frontend=None, abort=None, player=None, key=None,
         
         manifest = get_manifest(url, session)
         url = manifest["baseURL"]
-        player = player_verification(manifest, player, key)
+        player = player_verification(manifest, player)
         
         duration = manifest.get("duration")
         if duration:
@@ -54,7 +54,7 @@ def fetch(*pos, dest_file, frontend=None, abort=None, player=None, key=None,
             duration = None
         
         # TODO: determine preferred bitrate, max bitrate, etc
-        media = manifest["media"][0]  # Just pick the first one!
+        media = manifest["media"][-1]  # Assume last one is most desirable
         href = media.get("href")
         if href is not None:
             href = urljoin(url, href)
@@ -116,7 +116,7 @@ def get_bootstrap(media, *, session, url, player=""):
     if bsurl is not None:
         bsurl = urljoin(url, bsurl)
         bsurl = urljoin(bsurl, player)
-        with http_get(session, bsurl, "video/abst") as response:
+        with http_get(session, bsurl, ("video/abst",)) as response:
             bootstrap = response.read()
     else:
         bootstrap = io.BytesIO(bootstrap["data"])
@@ -504,11 +504,15 @@ def progress_update(frontend, flv, time, duration):
             time, duration, size / 1e6))
         stderr.flush()
 
-def manifest_url(url, file, hdnea=None):
-    file += "/manifest.f4m?hdcore="
+def manifest_url(url, hdnea=None):
+    query = [("hdcore", "")]  # Produces 403 Forbidden without this
     if hdnea:
-        file += "&hdnea=" + urlencode_param(hdnea)
-    return urljoin(url, file)
+        query.append(("hdnea", hdnea))
+    query = urlencode(query)
+    base_query = urlsplit(url).query
+    if base_query:
+        query = base_query + "&" + query
+    return urljoin(url, "?" + query)
 
 def get_manifest(url, session):
     """Downloads the manifest specified by the URL and parses it
@@ -534,7 +538,7 @@ def get_manifest(url, session):
     parsed.setdefault("baseURL", url)
     
     bootstraps = dict()
-    for bootstrap in manifest.findall(F4M_NAMESPACE + "bootstrapInfo"):
+    for bootstrap in manifest.iterfind(F4M_NAMESPACE + "bootstrapInfo"):
         item = dict(bootstrap.items())
         
         bootstrap = bootstrap.text
@@ -545,7 +549,7 @@ def get_manifest(url, session):
         bootstraps[item.get("id")] = item
     
     parsed["media"] = list()
-    for media in manifest.findall(F4M_NAMESPACE + "media"):
+    for media in manifest.iterfind(F4M_NAMESPACE + "media"):
         item = dict(media.items())
         item.update(xml_text_elements(media, F4M_NAMESPACE))
         item["bootstrapInfo"] = bootstraps[item.get("bootstrapInfoId")]
@@ -631,18 +635,20 @@ DISCONT_END = 0
 DISCONT_FRAG = 1
 DISCONT_TIME = 2
 
-def player_verification(manifest, player, key):
+def player_verification(manifest, player):
     pv = manifest.get("pv-2.0")
     if not pv:
         return ""
     (data, hdntl) = pv.split(";")
     msg = "st=0~exp=9999999999~acl=*~data={}!{}".format(data, player)
-    sig = hmac.new(key, msg.encode("ascii"), sha256)
+    sig = hmac.new(akamaihd_key, msg.encode("ascii"), sha256)
     pvtoken = "{}~hmac={}".format(msg, sig.hexdigest())
     
-    # The "hdntl" parameter must be passed either in the URL or as a cookie
-    return "?pvtoken={}&{}".format(
-        urlencode_param(pvtoken), urlencode_param(hdntl))
+    # The "hdntl" parameter must be passed either in the URL or as a cookie;
+    # however the "pvtoken" parameter only seems to work in the URL
+    pvtoken = urlencode((("pvtoken", pvtoken),))
+    hdntl = quote_plus(hdntl, safe="=")
+    return "?{}&{}".format(pvtoken, hdntl)
 
 def skip_box(stream):
     (_, size) = read_box_header(stream)
