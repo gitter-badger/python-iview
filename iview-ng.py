@@ -17,12 +17,13 @@ def findShow(query):
 	shows = []
 	for show in index:
 		if show.get('title').find(query) > -1:
-			print('['+str(len(shows))+']', show.get('title'), len(show.get('items')), 'eps')
+			#print('['+str(len(shows))+']', show.get('title'), len(show.get('items')), 'eps')
+			print('['+str(len(shows))+']', show.get('title'))
 			shows.append(show)
 
 def findEp(showNum):
 	global eps
-	eps = iview.comm.get_series_items(shows[showNum].get('id'))
+	[eps, _] = iview.comm.get_series_items(shows[showNum].get('id'))
 	print(shows[showNum].get('title') + ':')
 	i=0
 	for ep in eps:
@@ -32,7 +33,8 @@ def findEp(showNum):
 def getEp(epNum):
 	ep = eps[epNum]
 	print(ep)
-	iview.fetch.fetch_program(ep.get('url'))
+	episode = iview.comm.get_episode(ep.get('url'))
+	iview.fetch.fetch_program(episode)
 
 def makeIndex():
 	global index
